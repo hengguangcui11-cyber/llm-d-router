@@ -105,10 +105,10 @@ func responsesInputToConversation(input any) []tokenizerTypes.Conversation {
 // simpleResponsesMessage recognizes a Responses input item shaped like a plain
 // chat message: {"role": ..., "content": ...}, with an optional
 // "type": "message". Content is either a string or an array of content
-// parts; only text parts are converted, using their "text" field. Items
-// carrying any other "type" (function_call, function_call_output, reasoning,
-// and so on), or whose content yields no text, are skipped rather than
-// guessed at.
+// parts; text and image parts are converted (see responsesContentPart).
+// Items carrying any other "type" (function_call, function_call_output,
+// reasoning, and so on), or whose content yields no recognized parts, are
+// skipped rather than guessed at.
 func simpleResponsesMessage(item any) (tokenizerTypes.Conversation, bool) {
 	m, ok := item.(map[string]any)
 	if !ok {
@@ -130,7 +130,8 @@ func simpleResponsesMessage(item any) (tokenizerTypes.Conversation, bool) {
 
 // responsesContentTextTypes are the Responses content-part "type" values
 // this code converts to a chat-completions text block. Parts of any other
-// type (input_image, refusal, and so on) are skipped rather than guessed at.
+// recognized type convert differently (see responsesContentPart); an
+// unrecognized type is skipped rather than guessed at.
 var responsesContentTextTypes = map[string]bool{
 	"input_text":  true,
 	"output_text": true,
@@ -139,10 +140,11 @@ var responsesContentTextTypes = map[string]bool{
 
 // responsesContent converts a Responses input item's "content" field into
 // chat-completions Content. A plain string passes through as Raw. An array
-// of parts keeps only text parts, converting their "type" to blockTypeText;
-// a single resulting text part collapses to Raw, matching the plain-string
-// case. Returns false when content is neither shape, or an array yields no
-// text parts.
+// of parts converts each recognized part (see responsesContentPart); a
+// single resulting text part collapses to Raw, matching the plain-string
+// case, and multiple parts (or a single image part) use Structured. Returns
+// false when content is neither shape, or an array yields no recognized
+// parts.
 func responsesContent(raw any) (*tokenizerTypes.Content, bool) {
 	switch v := raw.(type) {
 	case string:
@@ -150,29 +152,49 @@ func responsesContent(raw any) (*tokenizerTypes.Content, bool) {
 	case []any:
 		var blocks []tokenizerTypes.ContentBlock
 		for _, part := range v {
-			p, ok := part.(map[string]any)
-			if !ok {
-				continue
+			if block, ok := responsesContentPart(part); ok {
+				blocks = append(blocks, block)
 			}
-			partType, _ := p["type"].(string)
-			if !responsesContentTextTypes[partType] {
-				continue
-			}
-			text, ok := p["text"].(string)
-			if !ok {
-				continue
-			}
-			blocks = append(blocks, tokenizerTypes.ContentBlock{Type: blockTypeText, Text: text})
 		}
 		if len(blocks) == 0 {
 			return nil, false
 		}
-		if len(blocks) == 1 {
+		if len(blocks) == 1 && blocks[0].Type == blockTypeText {
 			return &tokenizerTypes.Content{Raw: blocks[0].Text}, true
 		}
 		return &tokenizerTypes.Content{Structured: blocks}, true
 	default:
 		return nil, false
+	}
+}
+
+// responsesContentPart converts one content part. input_text/output_text
+// parts convert to a text block using their "text" field. input_image parts
+// convert to an image block using their "image_url" field, which carries the
+// URL as a bare string, unlike chat completions' nested
+// {"image_url": {"url": ...}} shape. Any other type is skipped rather than
+// guessed at.
+func responsesContentPart(part any) (tokenizerTypes.ContentBlock, bool) {
+	p, ok := part.(map[string]any)
+	if !ok {
+		return tokenizerTypes.ContentBlock{}, false
+	}
+	partType, _ := p["type"].(string)
+	switch {
+	case responsesContentTextTypes[partType]:
+		text, ok := p["text"].(string)
+		if !ok {
+			return tokenizerTypes.ContentBlock{}, false
+		}
+		return tokenizerTypes.ContentBlock{Type: blockTypeText, Text: text}, true
+	case partType == "input_image":
+		url, ok := p["image_url"].(string)
+		if !ok || url == "" {
+			return tokenizerTypes.ContentBlock{}, false
+		}
+		return tokenizerTypes.ContentBlock{Type: blockTypeImageURL, ImageURL: tokenizerTypes.ImageBlock{URL: url}}, true
+	default:
+		return tokenizerTypes.ContentBlock{}, false
 	}
 }
 

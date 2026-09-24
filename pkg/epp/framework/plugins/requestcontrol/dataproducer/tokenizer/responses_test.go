@@ -118,18 +118,48 @@ func TestResponsesPayloadWire_ArrayContentMultipleTextParts(t *testing.T) {
 	]}`, string(body))
 }
 
-func TestResponsesPayloadWire_ArrayContentSkipsNonTextParts(t *testing.T) {
+//nolint:goconst // "role"/"content"/"type" JSON keys read clearly inline; not worth naming
+func TestResponsesPayloadWire_ArrayContentImagePart(t *testing.T) {
 	r := &fwkrh.ResponsesRequest{
 		Input: []any{
-			// A text part alongside a non-text part keeps only the text part.
+			// A single image part converts on its own, using Structured
+			// rather than collapsing to Raw (that collapse is text-only).
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "input_image", "image_url": "http://example.com/y.png"},
+			}},
+			// A text part alongside an image part keeps both.
 			map[string]any{"role": "user", "content": []any{
 				map[string]any{"type": "input_image", "image_url": "http://example.com/x.png"},
 				map[string]any{"type": "input_text", "text": "describe this"},
 			}},
-			// An item whose content is entirely non-text parts has no
-			// renderable text and is skipped, like other unhandled shapes.
+		},
+	}
+	got, err := responsesPayload(r)
+	require.NoError(t, err)
+	body, err := got.Marshal()
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"messages":[
+		{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://example.com/y.png"}}]},
+		{"role":"user","content":[
+			{"type":"image_url","image_url":{"url":"http://example.com/x.png"}},
+			{"type":"text","text":"describe this"}
+		]}
+	]}`, string(body))
+}
+
+//nolint:goconst // "role"/"content"/"type" JSON keys read clearly inline; not worth naming
+func TestResponsesPayloadWire_ArrayContentSkipsUnrecognizedParts(t *testing.T) {
+	r := &fwkrh.ResponsesRequest{
+		Input: []any{
+			// A text part alongside an unrecognized part keeps only the text part.
 			map[string]any{"role": "user", "content": []any{
-				map[string]any{"type": "input_image", "image_url": "http://example.com/y.png"},
+				map[string]any{"type": "refusal", "refusal": "cannot help with that"},
+				map[string]any{"type": "input_text", "text": "describe this"},
+			}},
+			// An item whose content is entirely unrecognized parts has no
+			// renderable content and is skipped, like other unhandled shapes.
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "refusal", "refusal": "cannot help with that"},
 			}},
 		},
 	}
@@ -184,7 +214,7 @@ func TestResponsesPayloadWire_EmptyInputErrors(t *testing.T) {
 
 	_, err = responsesPayload(&fwkrh.ResponsesRequest{
 		Input: []any{map[string]any{"role": "user", "content": []any{
-			map[string]any{"type": "input_image", "image_url": "http://example.com/x.png"},
+			map[string]any{"type": "refusal", "refusal": "cannot help with that"},
 		}}},
 	})
 	assert.ErrorContains(t, err, "no renderable input")
