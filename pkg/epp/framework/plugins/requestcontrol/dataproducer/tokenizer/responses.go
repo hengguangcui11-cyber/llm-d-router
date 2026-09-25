@@ -20,6 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
@@ -30,13 +33,106 @@ import (
 // reasoning, and so on) are left for a follow-up.
 const responsesItemTypeMessage = "message"
 
-// renderResponses reshapes a /v1/responses body into a chat-completions render
-// call, since vLLM has no /v1/responses/render endpoint yet. The reshape covers
-// string Input, Input items that are simple {role, content} messages, and
-// Instructions as a leading system message; other Input item kinds (for
-// example function_call, function_call_output, reasoning) are left for a
-// follow-up rather than tokenized incorrectly here.
-func (b renderBackend) renderResponses(ctx context.Context, r *fwkrh.ResponsesRequest) (*fwkrh.TokenizedRequest, error) {
+const (
+	responsesRenderModeAuto   = "auto"
+	responsesRenderModeLegacy = "legacy"
+	responsesRenderModeNative = "native"
+)
+
+// legacyResponsesMode tracks whether the render endpoint speaks
+// /v1/responses/render natively, discovering it once (auto) or honoring an
+// explicit override (native/legacy). A nil *legacyResponsesMode means native
+// rendering with no compatibility state, matching legacyMessagesMode.
+type legacyResponsesMode struct {
+	name      string
+	mode      string
+	discovery chan struct{}
+}
+
+// configureLegacyResponses returns the Responses rendering mode tracker for
+// mode ("", "auto", "native", or "legacy").
+func configureLegacyResponses(ctx context.Context, name, mode string) (*legacyResponsesMode, error) {
+	switch mode {
+	case "", responsesRenderModeAuto:
+		return &legacyResponsesMode{name: name, discovery: make(chan struct{}, 1)}, nil
+	case responsesRenderModeLegacy:
+		warnLegacyResponses(ctx, name)
+		return &legacyResponsesMode{mode: mode}, nil
+	case responsesRenderModeNative:
+		return nil, nil //nolint:nilnil // Native rendering needs no compatibility state.
+	default:
+		return nil, fmt.Errorf("invalid vllm.responsesRenderMode %q: must be %q, %q or %q",
+			mode, responsesRenderModeAuto, responsesRenderModeLegacy, responsesRenderModeNative)
+	}
+}
+
+func warnLegacyResponses(ctx context.Context, name string) {
+	log.FromContext(ctx).Info(
+		"vllm.responsesRenderMode=legacy is deprecated and does not guarantee token parity; use native with a renderer supporting /v1/responses/render",
+		"pluginName", name,
+	)
+}
+
+// useLegacy reports whether Responses rendering should use the legacy
+// chat-completions translation instead of the native /v1/responses/render
+// endpoint, discovering and caching the answer on first use. Mirrors
+// legacyMessagesMode.useLegacy.
+func (m *legacyResponsesMode) useLegacy(ctx context.Context, tk tokenizer, model string) (bool, error) {
+	if m == nil {
+		return false, nil
+	}
+	if m.discovery == nil {
+		return m.mode == responsesRenderModeLegacy, nil
+	}
+	// A waiting request must be able to cancel while another caller probes.
+	select {
+	case m.discovery <- struct{}{}:
+		defer func() { <-m.discovery }()
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	if m.mode == "" {
+		mode := responsesRenderModeNative
+		tokens, _, err := tk.RenderResponses(ctx, fwkrh.PayloadMap{
+			"model": model, "max_tokens": 1, "input": "warmup",
+		})
+		if err != nil {
+			var status *renderStatusError
+			if !errors.As(err, &status) || (status.StatusCode != http.StatusNotFound && status.StatusCode != http.StatusMethodNotAllowed) {
+				return false, fmt.Errorf("discover Responses rendering: %w", err)
+			}
+			// The legacy path renders through the chat-completions endpoint, whose
+			// payload shape differs from the native probe above (messages, not input).
+			mode = responsesRenderModeLegacy
+			legacyProbe, perr := responsesPayload(&fwkrh.ResponsesRequest{Input: "warmup"})
+			if perr != nil {
+				return false, fmt.Errorf("discover legacy Responses rendering: %w", perr)
+			}
+			legacyProbe["model"] = model
+			legacyProbe["max_tokens"] = 1
+			tokens, _, err = tk.RenderChat(ctx, legacyProbe)
+			if err != nil {
+				return false, fmt.Errorf("discover legacy Responses rendering: %w", err)
+			}
+		}
+		if len(tokens) == 0 {
+			return false, errors.New("responses render discovery returned no tokens")
+		}
+		m.mode = mode
+		if mode == responsesRenderModeLegacy {
+			warnLegacyResponses(ctx, m.name)
+		}
+	}
+	return m.mode == responsesRenderModeLegacy, nil
+}
+
+// renderLegacyResponses reshapes a /v1/responses body into a chat-completions
+// render call, for a render endpoint without /v1/responses/render. The
+// reshape covers string Input, Input items that are simple {role, content}
+// messages, and Instructions as a leading system message; other Input item
+// kinds (for example function_call, function_call_output, reasoning) are
+// left for a follow-up rather than tokenized incorrectly here.
+func (b renderBackend) renderLegacyResponses(ctx context.Context, r *fwkrh.ResponsesRequest) (*fwkrh.TokenizedRequest, error) {
 	payload, err := responsesPayload(r)
 	if err != nil {
 		return nil, err
