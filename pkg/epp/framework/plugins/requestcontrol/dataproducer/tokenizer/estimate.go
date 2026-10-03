@@ -413,21 +413,76 @@ func (b estimateBackend) appendResponsesInput(out []byte, features []fwkrh.Multi
 	return out, features
 }
 
-// appendResponsesItem flattens one Input item shaped like a plain chat
-// message: {"role": ..., "content": ...}, with an optional "type": "message".
-// Items carrying any other "type" contribute nothing.
+// appendResponsesItem flattens one Input item for the byte estimate. An item
+// shaped like a plain chat message ({"role": ..., "content": ...}, with an
+// optional "type": "message") flattens through content. function_call,
+// function_call_output, and reasoning items flatten their own text-bearing
+// fields rather than contributing nothing: an agentic Responses turn is
+// mostly these item types, and undercounting their length feeds a too-short
+// estimate into the P/D disaggregation decider, context-length admission,
+// and prefix-hash scoring, all of which read this backend's token count. An
+// item of any other type contributes nothing, since this code does not know
+// its shape.
 func (b estimateBackend) appendResponsesItem(out []byte, features []fwkrh.MultiModalFeature, item any) ([]byte, []fwkrh.MultiModalFeature) {
 	m, ok := item.(map[string]any)
 	if !ok {
 		return out, features
 	}
-	if t, ok := m["type"].(string); ok && t != "" && t != responsesItemTypeMessage {
-		return out, features
+	switch t, _ := m["type"].(string); t {
+	case "", responsesItemTypeMessage:
+		if role, ok := m["role"].(string); ok {
+			out = append(out, []byte(role)...)
+		}
+		return b.appendResponsesContent(out, features, m["content"])
+	case "function_call":
+		if name, ok := m["name"].(string); ok {
+			out = append(out, []byte(name)...)
+		}
+		if args, ok := m["arguments"].(string); ok {
+			out = append(out, []byte(args)...)
+		}
+	case "function_call_output":
+		out = appendResponsesOutputText(out, m["output"])
+	case "reasoning":
+		out = appendResponsesSummaryText(out, m["summary"])
 	}
-	if role, ok := m["role"].(string); ok {
-		out = append(out, []byte(role)...)
+	return out, features
+}
+
+// appendResponsesOutputText flattens a function_call_output item's "output"
+// field: a plain string, or an array of content parts shaped like
+// {"type": "output_text", "text": ...}.
+func appendResponsesOutputText(out []byte, output any) []byte {
+	switch v := output.(type) {
+	case string:
+		return append(out, []byte(v)...)
+	case []any:
+		for _, part := range v {
+			if p, ok := part.(map[string]any); ok {
+				if text, ok := p["text"].(string); ok {
+					out = append(out, []byte(text)...)
+				}
+			}
+		}
 	}
-	return b.appendResponsesContent(out, features, m["content"])
+	return out
+}
+
+// appendResponsesSummaryText flattens a reasoning item's "summary" field: an
+// array of {"type": "summary_text", "text": ...} parts.
+func appendResponsesSummaryText(out []byte, summary any) []byte {
+	parts, ok := summary.([]any)
+	if !ok {
+		return out
+	}
+	for _, part := range parts {
+		if p, ok := part.(map[string]any); ok {
+			if text, ok := p["text"].(string); ok {
+				out = append(out, []byte(text)...)
+			}
+		}
+	}
+	return out
 }
 
 // appendResponsesContent flattens an Input item's "content" field: a plain
