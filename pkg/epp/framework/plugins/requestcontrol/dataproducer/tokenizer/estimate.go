@@ -379,12 +379,10 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 }
 
 // responsesBytes flattens a /v1/responses request into pseudo-token bytes,
-// folding multimodal placeholders in on aligned boundaries. Input is a
-// string or an array of items; only items shaped like a plain
-// {role, content} message contribute, matching renderBackend's coverage.
-// Content is a string or an array of parts: input_text/output_text parts
-// contribute their text, input_image parts fold in an image placeholder.
-// input_audio is left for a follow-up.
+// folding multimodal placeholders in on aligned boundaries. Tools and a
+// string Instructions contribute their bytes ahead of Input, matching
+// messagesBytes. Input is a string or an array of items (see
+// appendResponsesItem for per-item coverage).
 func (b estimateBackend) responsesBytes(r *fwkrh.ResponsesRequest) ([]byte, []fwkrh.MultiModalFeature) {
 	var out []byte
 	var features []fwkrh.MultiModalFeature
@@ -501,7 +499,9 @@ func (b estimateBackend) appendResponsesContent(out []byte, features []fwkrh.Mul
 
 // appendResponsesContentPart flattens one content part. input_image carries
 // its URL as a bare string field, unlike chat completions' nested
-// {"image_url": {"url": ...}} shape.
+// {"image_url": {"url": ...}} shape. An input_audio part contributes
+// nothing: the Responses input content union does not define it, so the
+// model server refuses a request carrying one.
 func (b estimateBackend) appendResponsesContentPart(out []byte, features []fwkrh.MultiModalFeature, part any) ([]byte, []fwkrh.MultiModalFeature) {
 	p, ok := part.(map[string]any)
 	if !ok {

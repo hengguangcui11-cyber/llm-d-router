@@ -247,8 +247,8 @@ func TestEstimateBackend_ResponsesAgenticItemsCounted(t *testing.T) {
 
 // TestEstimateBackend_ResponsesSkipsUnrecognizedItems documents that an item
 // of a type this code does not know contributes nothing, rather than
-// guessing at its shape -- unlike function_call/function_call_output/
-// reasoning, which are now recognized (see
+// guessing at its shape. function_call, function_call_output, and reasoning
+// have known shapes and contribute their text-bearing fields (see
 // TestEstimateBackend_ResponsesAgenticItemsCounted).
 func TestEstimateBackend_ResponsesSkipsUnrecognizedItems(t *testing.T) {
 	body := &fwkrh.InferenceRequestBody{Responses: &fwkrh.ResponsesRequest{
