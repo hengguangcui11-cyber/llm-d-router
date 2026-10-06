@@ -539,7 +539,7 @@ func DeleteFlowControlPoolSaturation(inferencePool, stage string) {
 
 // RecordFlowControlStaleEndpoints records how many candidate endpoints the given saturation
 // detector scored as fully saturated because their metrics were missing or stale, for the
-// pipeline stage named in ctx by flowcontrol.WithSaturationStage (empty when unpartitioned).
+// given pipeline stage (empty when unpartitioned).
 func RecordFlowControlStaleEndpoints(detector, stage string, count int) {
 	llmdFlowControlStaleEndpoints.WithLabelValues(detector, stage).Set(float64(count))
 }
