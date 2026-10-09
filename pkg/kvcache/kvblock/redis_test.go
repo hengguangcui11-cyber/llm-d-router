@@ -153,3 +153,47 @@ func TestRedisLookup_ConnectionFailureReturnsError(t *testing.T) {
 	require.Error(t, err)
 	require.Empty(t, result)
 }
+
+// TestRedisLookup_SingleBadKeyIsNotAPipelineFailure verifies that a Lookup
+// call for exactly one key -- the shape every single-block prompt uses --
+// does not misclassify that key's own WRONGTYPE conflict as a pipeline
+// round-trip failure. len(results) == 1 made every result error, which is
+// exactly the shape a genuine connection failure also produces.
+func TestRedisLookup_SingleBadKeyIsNotAPipelineFailure(t *testing.T) {
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+	defer server.Close()
+
+	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
+	require.NoError(t, err)
+
+	badKey := BlockHash(222)
+	require.NoError(t, server.Set(badKey.String(), "not-a-hash"))
+
+	result, err := index.Lookup(t.Context(), []BlockHash{badKey}, sets.Set[string]{})
+	require.NoError(t, err)
+	require.Empty(t, result)
+}
+
+// TestRedisLookup_AllKeysBadIsNotAPipelineFailure verifies that a Lookup
+// call where every key hits a WRONGTYPE conflict reports the same outcome
+// as a normal zero-block cache miss (no error, empty result), not a
+// pipeline failure -- the same prefix-chain shape as
+// TestRedisLookup_SingleBadKeyIsNotAPipelineFailure, just with more than
+// one key all erroring the same way.
+func TestRedisLookup_AllKeysBadIsNotAPipelineFailure(t *testing.T) {
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+	defer server.Close()
+
+	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
+	require.NoError(t, err)
+
+	badKey1, badKey2 := BlockHash(222), BlockHash(333)
+	require.NoError(t, server.Set(badKey1.String(), "not-a-hash"))
+	require.NoError(t, server.Set(badKey2.String(), "not-a-hash"))
+
+	result, err := index.Lookup(t.Context(), []BlockHash{badKey1, badKey2}, sets.Set[string]{})
+	require.NoError(t, err)
+	require.Empty(t, result)
+}
